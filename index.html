@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BD Country News Ticker</title>
+<script src="https://cdn.jsdelivr.net/npm/monday-sdk-js/dist/main.js"></script>
+<style>
+  :root {
+    --bg: #0b1220;
+    --bg-2: #101a2e;
+    --fg: #e8edf7;
+    --muted: #7c8aab;
+    --accent: #ff5a3c;   /* Blue Aerospace-ish signal orange, swap for real brand color */
+    --line: #1e2a44;
+    --live-dot: #34d399;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+
+  .ticker-shell {
+    position: relative;
+    display: flex;
+    align-items: stretch;
+    width: 100%;
+    height: 100%;
+    min-height: 44px;
+    background: linear-gradient(180deg, var(--bg-2), var(--bg));
+    border-bottom: 1px solid var(--line);
+    overflow: hidden;
+  }
+
+  .ticker-label {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 16px;
+    background: var(--accent);
+    color: #1a0d08;
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    z-index: 2;
+    clip-path: polygon(0 0, 100% 0, calc(100% - 14px) 100%, 0 100%);
+    padding-right: 28px;
+  }
+
+  .live-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--live-dot);
+    box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.7);
+    animation: pulse 1.8s infinite;
+    flex: 0 0 auto;
+  }
+
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.55); }
+    70%  { box-shadow: 0 0 0 6px rgba(52, 211, 153, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+  }
+
+  .ticker-track-wrap {
+    position: relative;
+    flex: 1 1 auto;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+  }
+
+  .ticker-track {
+    display: flex;
+    align-items: center;
+    white-space: nowrap;
+    will-change: transform;
+    animation: scroll-left linear infinite;
+    padding-left: 100%;
+  }
+
+  .ticker-track.paused { animation-play-state: paused; }
+
+  @keyframes scroll-left {
+    from { transform: translateX(0); }
+    to   { transform: translateX(-100%); }
+  }
+
+  .ticker-item {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 0 32px;
+    font-size: 13px;
+    color: var(--fg);
+  }
+
+  .ticker-item .flag-country {
+    font-weight: 700;
+    color: #ffd7c9;
+    letter-spacing: 0.03em;
+  }
+
+  .ticker-item .headline {
+    color: var(--fg);
+  }
+
+  .ticker-item .sep {
+    color: var(--muted);
+    margin: 0 6px;
+  }
+
+  .ticker-status {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 14px;
+    font-size: 11px;
+    color: var(--muted);
+    white-space: nowrap;
+    border-left: 1px solid var(--line);
+  }
+
+  .ticker-status button {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 2px 4px;
+    line-height: 1;
+  }
+  .ticker-status button:hover { color: var(--fg); }
+
+  .empty-state, .error-state {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .error-state { color: #ff8a75; }
+</style>
+</head>
+<body>
+
+<div class="ticker-shell" id="shell">
+  <div class="ticker-label">
+    <span class="live-dot"></span>
+    <span>Country News</span>
+  </div>
+
+  <div class="ticker-track-wrap" id="trackWrap">
+    <div class="ticker-track" id="track"></div>
+  </div>
+
+  <div class="ticker-status" id="status">
+    <span id="statusText">Loading…</span>
+    <button id="pauseBtn" title="Pause / resume scrolling">⏸</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  var monday = window.mondaySdk ? mondaySdk() : null;
+
+  var state = {
+    boardIds: [],
+    countries: [],   // configured filter, lowercase, no flag emoji
+    speedPxPerSec: 60,
+    refreshMs: 3 * 60 * 1000, // 5-minute default overridden below by settings if provided
+    itemLimit: 40,
+    paused: false
+  };
+
+  var track = document.getElementById("track");
+  var trackWrap = document.getElementById("trackWrap");
+  var statusText = document.getElementById("statusText");
+  var pauseBtn = document.getElementById("pauseBtn");
+  var refreshTimer = null;
+
+  pauseBtn.addEventListener("click", function () {
+    state.paused = !state.paused;
+    track.classList.toggle("paused", state.paused);
+    pauseBtn.textContent = state.paused ? "▶" : "⏸";
+  });
+
+  function parseCountryList(raw) {
+    if (!raw) return [];
+    return raw.split(",")
+      .map(function (s) { return s.trim().toLowerCase(); })
+      .filter(Boolean);
+  }
+
+  // Group titles look like "🇺🇸 United States" — strip any leading
+  // non-letter symbols (flag emoji, spaces) to compare just the name.
+  function bareCountryName(title) {
+    return (title || "")
+      .replace(/^[^\p{L}]+/u, "")
+      .trim()
+      .toLowerCase();
+  }
+
+  function escapeHtml(s) {
+    return (s || "").replace(/[&<>"']/g, function (c) {
+      return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+    });
+  }
+
+  function setStatus(text) {
+    statusText.textContent = text;
+  }
+
+  function render(items) {
+    if (!items.length) {
+      track.innerHTML = "";
+      trackWrap.innerHTML = '<div class="empty-state">No recent news for the configured countries yet.</div>';
+      return;
+    }
+
+    var html = items.map(function (it) {
+      return '<span class="ticker-item">' +
+        '<span class="flag-country">' + escapeHtml(it.groupTitle) + '</span>' +
+        '<span class="sep">&bull;</span>' +
+        '<span class="headline">' + escapeHtml(it.name) + '</span>' +
+        '</span>';
+    }).join("");
+
+    track.innerHTML = html + html; // duplicate once for a seamless loop
+    var trackWidth = track.scrollWidth / 2;
+    var duration = Math.max(20, trackWidth / state.speedPxPerSec);
+    track.style.animationDuration = duration + "s";
+  }
+
+  function fetchNews() {
+    if (!monday || !state.boardIds.length) {
+      setStatus(!monday ? "SDK unavailable" : "No board connected");
+      return;
+    }
+
+    setStatus("Refreshing…");
+
+    var query = "query ($boardIds: [ID!]) {" +
+      "  boards(ids: $boardIds) {" +
+      "    groups {" +
+      "      title" +
+      "      items_page(limit: " + state.itemLimit + ") {" +
+      "        items { id name created_at }" +
+      "      }" +
+      "    }" +
+      "  }" +
+      "}";
+
+    monday.api(query, { variables: { boardIds: state.boardIds } })
+      .then(function (res) {
+        var boards = (res && res.data && res.data.boards) || [];
+        var all = [];
+
+        boards.forEach(function (b) {
+          (b.groups || []).forEach(function (g) {
+            var bare = bareCountryName(g.title);
+            var matches = !state.countries.length || state.countries.indexOf(bare) !== -1;
+            if (!matches) return;
+
+            (g.items_page && g.items_page.items || []).forEach(function (item) {
+              all.push({
+                name: item.name,
+                groupTitle: g.title,
+                createdAt: item.created_at
+              });
+            });
+          });
+        });
+
+        all.sort(function (a, b) {
+          return new Date(b.createdAt) - new Date(a.createdAt);
+        });
+
+        render(all.slice(0, state.itemLimit));
+        setStatus("Live · updated " + new Date().toLocaleTimeString());
+      })
+      .catch(function (err) {
+        console.error("Ticker fetch failed", err);
+        trackWrap.innerHTML = '<div class="error-state">Couldn\'t load news feed. Check the widget\'s board connection.</div>';
+        setStatus("Error");
+      });
+  }
+
+  function scheduleRefresh() {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(fetchNews, state.refreshMs);
+  }
+
+  if (monday) {
+    monday.listen("context", function (res) {
+      var data = res.data || {};
+      state.boardIds = data.boardIds || (data.boardId ? [data.boardId] : []);
+      fetchNews();
+    });
+
+    monday.listen("settings", function (res) {
+      var settings = res.data || {};
+      state.countries = parseCountryList(settings.countries);
+      if (settings.itemLimit) state.itemLimit = parseInt(settings.itemLimit, 10) || state.itemLimit;
+      if (settings.refreshMinutes) state.refreshMs = (parseInt(settings.refreshMinutes, 10) || 5) * 60 * 1000;
+      if (settings.speed) state.speedPxPerSec = parseInt(settings.speed, 10) || state.speedPxPerSec;
+      fetchNews();
+      scheduleRefresh();
+    });
+  } else {
+    setStatus("monday SDK failed to load");
+  }
+})();
+</script>
+
+</body>
+</html>
