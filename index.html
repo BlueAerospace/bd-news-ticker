@@ -177,13 +177,24 @@
 
 <script>
 (function () {
+  // ---------------------------------------------------------------------
+  // Backend URL: monday's client-side SDK can no longer make GraphQL calls
+  // directly (monday.api() was removed from the browser SDK and moved
+  // server-side), so this widget calls a tiny monday-code backend instead,
+  // which holds the real API token in monday's encrypted Secrets store and
+  // proxies the board query. Fill this in with the URL printed by
+  // `mapps code:push` (or shown on the app's "Server-side code" page)
+  // after the bd-news-ticker-backend project is deployed.
+  // ---------------------------------------------------------------------
+  var BACKEND_URL = "https://de0c7-service-36408021-b9fae46a.us.monday.app";
+
   var monday = window.mondaySdk ? mondaySdk() : null;
 
   var state = {
     boardIds: [],
     countries: [],   // configured filter, lowercase, no flag emoji
     speedPxPerSec: 60,
-    refreshMs: 3 * 60 * 1000, // 5-minute default overridden below by settings if provided
+    refreshMs: 3 * 60 * 1000,
     itemLimit: 40,
     paused: false
   };
@@ -193,6 +204,7 @@
   var statusText = document.getElementById("statusText");
   var pauseBtn = document.getElementById("pauseBtn");
   var refreshTimer = null;
+  var activeFetchToken = 0;
 
   pauseBtn.addEventListener("click", function () {
     state.paused = !state.paused;
@@ -226,6 +238,11 @@
     statusText.textContent = text;
   }
 
+  function showError(message) {
+    setStatus("Error");
+    trackWrap.innerHTML = '<div class="error-state">' + escapeHtml(message) + "</div>";
+  }
+
   function render(items) {
     if (!items.length) {
       track.innerHTML = "";
@@ -248,26 +265,41 @@
   }
 
   function fetchNews() {
-    if (!monday || !state.boardIds.length) {
-      setStatus(!monday ? "SDK unavailable" : "No board connected");
+    if (!state.boardIds.length) {
+      setStatus("No board connected");
+      return;
+    }
+
+    if (!BACKEND_URL || BACKEND_URL.indexOf("REPLACE_WITH") === 0) {
+      showError("Backend URL not configured yet — see comment at top of the script.");
       return;
     }
 
     setStatus("Refreshing…");
 
-    var query = "query ($boardIds: [ID!]) {" +
-      "  boards(ids: $boardIds) {" +
-      "    groups {" +
-      "      title" +
-      "      items_page(limit: " + state.itemLimit + ") {" +
-      "        items { id name created_at }" +
-      "      }" +
-      "    }" +
-      "  }" +
-      "}";
+    var myToken = ++activeFetchToken;
+    var timedOut = false;
+    var timeoutTimer = setTimeout(function () {
+      if (myToken !== activeFetchToken) return;
+      timedOut = true;
+      showError("Backend did not respond within 15s.");
+    }, 15000);
 
-    monday.api(query, { variables: { boardIds: state.boardIds } })
+    var url = BACKEND_URL.replace(/\/$/, "") +
+      "/news?boardIds=" + encodeURIComponent(state.boardIds.join(",")) +
+      "&itemLimit=" + encodeURIComponent(state.itemLimit);
+
+    fetch(url)
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status + " from backend");
+        return r.json();
+      })
       .then(function (res) {
+        if (timedOut || myToken !== activeFetchToken) return;
+        clearTimeout(timeoutTimer);
+
+        if (res && res.error) throw new Error(res.error);
+
         var boards = (res && res.data && res.data.boards) || [];
         var all = [];
 
@@ -295,9 +327,10 @@
         setStatus("Live · updated " + new Date().toLocaleTimeString());
       })
       .catch(function (err) {
+        if (timedOut || myToken !== activeFetchToken) return;
+        clearTimeout(timeoutTimer);
         console.error("Ticker fetch failed", err);
-        trackWrap.innerHTML = '<div class="error-state">Couldn\'t load news feed. Check the widget\'s board connection.</div>';
-        setStatus("Error");
+        showError("Couldn't load news feed: " + (err && err.message ? err.message : String(err)));
       });
   }
 
@@ -308,19 +341,29 @@
 
   if (monday) {
     monday.listen("context", function (res) {
-      var data = res.data || {};
-      state.boardIds = data.boardIds || (data.boardId ? [data.boardId] : []);
-      fetchNews();
+      try {
+        var data = res.data || {};
+        state.boardIds = data.boardIds || (data.boardId ? [data.boardId] : []);
+        fetchNews();
+      } catch (err) {
+        console.error("context listener failed", err);
+        showError("Internal error (context): " + (err && err.message ? err.message : String(err)));
+      }
     });
 
     monday.listen("settings", function (res) {
-      var settings = res.data || {};
-      state.countries = parseCountryList(settings.countries);
-      if (settings.itemLimit) state.itemLimit = parseInt(settings.itemLimit, 10) || state.itemLimit;
-      if (settings.refreshMinutes) state.refreshMs = (parseInt(settings.refreshMinutes, 10) || 5) * 60 * 1000;
-      if (settings.speed) state.speedPxPerSec = parseInt(settings.speed, 10) || state.speedPxPerSec;
-      fetchNews();
-      scheduleRefresh();
+      try {
+        var settings = res.data || {};
+        state.countries = parseCountryList(settings.countries);
+        if (settings.itemLimit) state.itemLimit = parseInt(settings.itemLimit, 10) || state.itemLimit;
+        if (settings.refreshMinutes) state.refreshMs = (parseInt(settings.refreshMinutes, 10) || 5) * 60 * 1000;
+        if (settings.speed) state.speedPxPerSec = parseInt(settings.speed, 10) || state.speedPxPerSec;
+        fetchNews();
+        scheduleRefresh();
+      } catch (err) {
+        console.error("settings listener failed", err);
+        showError("Internal error (settings): " + (err && err.message ? err.message : String(err)));
+      }
     });
   } else {
     setStatus("monday SDK failed to load");
