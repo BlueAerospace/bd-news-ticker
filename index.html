@@ -219,13 +219,18 @@
       .filter(Boolean);
   }
 
-  // Group titles look like "🇺🇸 United States" — strip any leading
-  // non-letter symbols (flag emoji, spaces) to compare just the name.
+  // Group titles vary by board — some use a flag emoji ("🇺🇸 United States"),
+  // others use a two/three-letter country code instead ("US United States",
+  // "MX Mexico"). Strip whichever prefix is present so we're left with just
+  // the plain country name to compare against the configured list.
   function bareCountryName(title) {
-    return (title || "")
-      .replace(/^[^\p{L}]+/u, "")
-      .trim()
-      .toLowerCase();
+    var name = (title || "").trim();
+    // Strip a leading flag emoji or other non-letter symbols.
+    name = name.replace(/^[^\p{L}]+/u, "");
+    // Strip a leading all-caps country/region code (e.g. "US ", "MX ", "KR ")
+    // when followed by the actual name.
+    name = name.replace(/^[A-Z]{2,3}\s+/, "");
+    return name.trim().toLowerCase();
   }
 
   function escapeHtml(s) {
