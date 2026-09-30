@@ -298,7 +298,10 @@
         if (timedOut || myToken !== activeFetchToken) return;
         clearTimeout(timeoutTimer);
 
-        if (res && res.error) throw new Error(res.error);
+        if (res && res.error) {
+          var detail = res.details ? (typeof res.details === "string" ? res.details : JSON.stringify(res.details)) : "";
+          throw new Error(res.error + (detail ? " — " + detail : ""));
+        }
 
         var boards = (res && res.data && res.data.boards) || [];
         var all = [];
