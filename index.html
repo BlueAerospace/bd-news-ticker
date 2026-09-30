@@ -28,13 +28,19 @@
     font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
   }
 
+  /* Fixed-height bar pinned to the top of whatever box monday gives this
+     widget. Height is now a fixed value (not 100%) so the bar stays a
+     slim ticker even when the widget's box on the dashboard is much
+     taller than it needs to be — the rest of that box just shows the
+     dark background instead of stretching the label into a huge shape. */
   .ticker-shell {
-    position: relative;
+    position: absolute;
+    top: 0;
+    left: 0;
     display: flex;
     align-items: stretch;
     width: 100%;
-    height: 100%;
-    min-height: 54px;
+    height: 56px;
     background: linear-gradient(180deg, var(--bg-2), var(--bg));
     border-bottom: 1px solid var(--line);
     overflow: hidden;
