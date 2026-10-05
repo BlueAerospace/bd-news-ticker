@@ -161,6 +161,23 @@
   }
 
   .error-state { color: #ff8a75; }
+
+  /* Message overlay sits on top of the track instead of replacing it, so
+     the track element survives an error and can render on the next
+     successful fetch. */
+  .ticker-msg {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    padding: 0 16px;
+    font-size: 14px;
+    color: var(--muted);
+    background: var(--bg);
+    z-index: 1;
+  }
+  .ticker-msg.show { display: flex; }
+  .ticker-msg.error { color: #ff8a75; }
 </style>
 </head>
 <body>
@@ -173,6 +190,7 @@
 
   <div class="ticker-track-wrap" id="trackWrap">
     <div class="ticker-track" id="track"></div>
+    <div class="ticker-msg" id="msg"></div>
   </div>
 
   <div class="ticker-status" id="status">
@@ -206,11 +224,19 @@
   };
 
   var track = document.getElementById("track");
-  var trackWrap = document.getElementById("trackWrap");
+  var msgEl = document.getElementById("msg");
   var statusText = document.getElementById("statusText");
   var pauseBtn = document.getElementById("pauseBtn");
   var refreshTimer = null;
   var activeFetchToken = 0;
+  var retryTimer = null;
+  var retryCount = 0;
+  var RETRY_DELAYS_MS = [5000, 15000, 30000, 60000];
+  // monday-code backends scale to zero when idle; the first request after
+  // a quiet period can take 15s+ while the container cold-starts. Allow a
+  // generous timeout and retry instead of failing on the first slow call.
+  var REQUEST_TIMEOUT_MS = 45000;
+  var fetchDebounce = null;
 
   pauseBtn.addEventListener("click", function () {
     state.paused = !state.paused;
@@ -249,17 +275,48 @@
     statusText.textContent = text;
   }
 
+  function showMessage(message, isError) {
+    msgEl.textContent = message;
+    msgEl.classList.add("show");
+    msgEl.classList.toggle("error", !!isError);
+  }
+
+  function hideMessage() {
+    msgEl.classList.remove("show", "error");
+    msgEl.textContent = "";
+  }
+
   function showError(message) {
     setStatus("Error");
-    trackWrap.innerHTML = '<div class="error-state">' + escapeHtml(message) + "</div>";
+    showMessage(message, true);
+  }
+
+  function scheduleRetry(reason) {
+    if (retryTimer) clearTimeout(retryTimer);
+    if (retryCount >= RETRY_DELAYS_MS.length) {
+      showError(reason + " Will retry at next refresh.");
+      return;
+    }
+    var delay = RETRY_DELAYS_MS[retryCount++];
+    setStatus("Retrying in " + Math.round(delay / 1000) + "s");
+    // Keep the last good headlines on screen while retrying quietly.
+    if (!track.innerHTML) showMessage("Connecting to news backend…", false);
+    retryTimer = setTimeout(fetchNews, delay);
+  }
+
+  function requestFetch() {
+    // context and settings events both fire on load; collapse them into one call.
+    if (fetchDebounce) clearTimeout(fetchDebounce);
+    fetchDebounce = setTimeout(fetchNews, 300);
   }
 
   function render(items) {
     if (!items.length) {
       track.innerHTML = "";
-      trackWrap.innerHTML = '<div class="empty-state">No recent news for the configured countries yet.</div>';
+      showMessage("No recent news for the configured countries yet.", false);
       return;
     }
+    hideMessage();
 
     var html = items.map(function (it) {
       return '<span class="ticker-item">' +
@@ -286,28 +343,28 @@
       return;
     }
 
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
     setStatus("Refreshing…");
+    if (!track.innerHTML) showMessage("Loading news…", false);
 
     var myToken = ++activeFetchToken;
-    var timedOut = false;
+    var controller = window.AbortController ? new AbortController() : null;
     var timeoutTimer = setTimeout(function () {
-      if (myToken !== activeFetchToken) return;
-      timedOut = true;
-      showError("Backend did not respond within 15s.");
-    }, 15000);
+      if (controller) controller.abort();
+    }, REQUEST_TIMEOUT_MS);
 
     var url = BACKEND_URL.replace(/\/$/, "") +
       "/news?boardIds=" + encodeURIComponent(state.boardIds.join(",")) +
       "&itemLimit=" + encodeURIComponent(state.itemLimit);
 
-    fetch(url)
+    fetch(url, controller ? { signal: controller.signal } : undefined)
       .then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status + " from backend");
         return r.json();
       })
       .then(function (res) {
-        if (timedOut || myToken !== activeFetchToken) return;
         clearTimeout(timeoutTimer);
+        if (myToken !== activeFetchToken) return;
 
         if (res && res.error) {
           var detail = res.details ? (typeof res.details === "string" ? res.details : JSON.stringify(res.details)) : "";
@@ -337,20 +394,24 @@
           return new Date(b.createdAt) - new Date(a.createdAt);
         });
 
+        retryCount = 0;
         render(all.slice(0, state.itemLimit));
         setStatus("Live · updated " + new Date().toLocaleTimeString());
       })
       .catch(function (err) {
-        if (timedOut || myToken !== activeFetchToken) return;
         clearTimeout(timeoutTimer);
+        if (myToken !== activeFetchToken) return;
         console.error("Ticker fetch failed", err);
-        showError("Couldn't load news feed: " + (err && err.message ? err.message : String(err)));
+        var msg = (err && err.name === "AbortError")
+          ? "Backend did not respond within " + (REQUEST_TIMEOUT_MS / 1000) + "s."
+          : "Couldn't load news feed: " + (err && err.message ? err.message : String(err));
+        scheduleRetry(msg);
       });
   }
 
   function scheduleRefresh() {
     if (refreshTimer) clearInterval(refreshTimer);
-    refreshTimer = setInterval(fetchNews, state.refreshMs);
+    refreshTimer = setInterval(function () { retryCount = 0; fetchNews(); }, state.refreshMs);
   }
 
   if (monday) {
@@ -358,7 +419,7 @@
       try {
         var data = res.data || {};
         state.boardIds = data.boardIds || (data.boardId ? [data.boardId] : []);
-        fetchNews();
+        requestFetch();
       } catch (err) {
         console.error("context listener failed", err);
         showError("Internal error (context): " + (err && err.message ? err.message : String(err)));
@@ -372,7 +433,7 @@
         if (settings.itemLimit) state.itemLimit = parseInt(settings.itemLimit, 10) || state.itemLimit;
         if (settings.refreshMinutes) state.refreshMs = (parseInt(settings.refreshMinutes, 10) || 5) * 60 * 1000;
         if (settings.speed) state.speedPxPerSec = parseInt(settings.speed, 10) || state.speedPxPerSec;
-        fetchNews();
+        requestFetch();
         scheduleRefresh();
       } catch (err) {
         console.error("settings listener failed", err);
