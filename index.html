@@ -244,10 +244,26 @@
     pauseBtn.textContent = state.paused ? "▶" : "⏸";
   });
 
+  // Common alternate spellings so "USA", "Republic of Korea", "Türkiye"
+  // etc. in the settings or group titles still match.
+  var COUNTRY_ALIASES = {
+    "usa": "united states", "us": "united states", "united states of america": "united states",
+    "uk": "united kingdom", "great britain": "united kingdom",
+    "korea": "south korea", "republic of korea": "south korea", "rok": "south korea",
+    "türkiye": "turkey", "turkiye": "turkey",
+    "uae": "united arab emirates", "emirates": "united arab emirates",
+    "ksa": "saudi arabia", "republic of china": "taiwan"
+  };
+
+  function normalizeCountry(name) {
+    var n = (name || "").trim().toLowerCase();
+    return COUNTRY_ALIASES[n] || n;
+  }
+
   function parseCountryList(raw) {
     if (!raw) return [];
     return raw.split(",")
-      .map(function (s) { return s.trim().toLowerCase(); })
+      .map(function (s) { return normalizeCountry(s); })
       .filter(Boolean);
   }
 
@@ -376,21 +392,23 @@
 
         boards.forEach(function (b) {
           (b.groups || []).forEach(function (g) {
-            var bare = bareCountryName(g.title);
-            var matches = !state.countries.length || state.countries.indexOf(bare) !== -1;
-            if (!matches) return;
+            // Countries setting = the BD person's territory. Worldwide news is
+            // still shown, but territory stories always come first.
+            var inTerritory = state.countries.indexOf(normalizeCountry(bareCountryName(g.title))) !== -1;
 
             (g.items_page && g.items_page.items || []).forEach(function (item) {
               all.push({
                 name: item.name,
                 groupTitle: g.title,
-                createdAt: item.created_at
+                createdAt: item.created_at,
+                territory: inTerritory
               });
             });
           });
         });
 
         all.sort(function (a, b) {
+          if (a.territory !== b.territory) return a.territory ? -1 : 1;
           return new Date(b.createdAt) - new Date(a.createdAt);
         });
 
